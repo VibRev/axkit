@@ -60,7 +60,7 @@ cargo run --example echo_tool -- daemon status
 
 ## 待做
 
-- Windows 上的 daemon 传输
+- 在真 Windows 机器上验证（目前只做了交叉编译和 CI）；遇到问题请提 issue
 - conformance 测试 helper
 
 ## 开发
