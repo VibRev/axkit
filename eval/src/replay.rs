@@ -827,6 +827,8 @@ mod tests {
         assert_eq!((silent.class, silent.line.as_str()), (Class::Silent, "Error: not_found: cannot read the script /w/for s"));
     }
 
+    // The fake tool is a shell script with an executable bit.
+    #[cfg(unix)]
     #[test]
     fn replaying_runs_in_a_fresh_workspace_with_the_fixtures() {
         let dir = tempfile::tempdir().unwrap();

@@ -38,3 +38,6 @@ return_self_not_must_use = "warn"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"
+
+[target."cfg(windows)".dependencies]
+uds_windows = "1.2.1"

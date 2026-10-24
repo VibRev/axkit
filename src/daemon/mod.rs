@@ -20,17 +20,17 @@
 //! and both ends check the other's uid. A client that disconnects (Ctrl-C)
 //! cancels its command.
 //!
-//! When no daemon can be reached, [`Config::fallback`] decides: a stateless
-//! tool runs the command in-process and says why on stderr; a tool whose
-//! sessions live in the daemon fails instead, since running elsewhere would
-//! lose them without a word.
+//! When no daemon can be reached the command fails, as its sessions live
+//! there: running it elsewhere would lose them without a word.
 //!
-//! Unix only for now; elsewhere [`forward`] returns `None` and the command
-//! runs in-process. Windows named pipes are the plan (CONVENTIONS §8).
+//! Unix and Windows (10 1803+, for its AF_UNIX sockets); elsewhere
+//! [`forward`] returns `None` and the command runs in-process.
 
 mod frame;
-#[cfg(unix)]
-mod unix;
+#[cfg(any(unix, windows))]
+mod socket;
+#[cfg(any(unix, windows))]
+mod sys;
 
 use crate::agent::{self, Mode};
 use crate::exit::{self, Exit};
@@ -64,8 +64,9 @@ pub struct Config {
     /// sessions first.
     pub stop_wait: Duration,
     /// Directory of the sockets; default `$<TOOL>_RUNTIME_DIR`, else
-    /// `$XDG_RUNTIME_DIR/<tool>`. When that is unset or too long for a socket
-    /// path, `<temp>/<tool>-<uid>`, then `/tmp/<tool>-<uid>`.
+    /// `$XDG_RUNTIME_DIR/<tool>` (Windows: `%LOCALAPPDATA%\<tool>`). When
+    /// that is unset or too long for a socket path, `<temp>/<tool>-<uid>`,
+    /// then `/tmp/<tool>-<uid>` (Windows: `<temp>\<tool>-<USERNAME>`).
     pub runtime_dir: Option<PathBuf>,
     /// Whether a command line reads stdin (`exec -`, say): then the client
     /// reads it and sends it with the request ([`Request::stdin`]), as only
@@ -296,11 +297,11 @@ pub fn forward(config: &Config) -> Option<u8> {
     if config.is_disabled() {
         return None;
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::forward(config)
+        socket::forward(config)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         None
     }
@@ -313,11 +314,11 @@ pub fn call(config: &Config, request: &Request, out: &mut impl Write, err: &mut 
     if config.is_disabled() {
         return None;
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::call(config, request, out, err)
+        socket::call(config, request, out, err)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (request, out, err);
         None
@@ -331,11 +332,11 @@ pub fn call(config: &Config, request: &Request, out: &mut impl Write, err: &mut 
 ///
 /// No private socket directory, or the socket cannot be bound.
 pub fn serve(config: &Config, handler: &impl Handler) -> io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::serve(config, handler)
+        socket::serve(config, handler)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (config, handler);
         Err(io::Error::new(io::ErrorKind::Unsupported, "the daemon needs Unix sockets"))
@@ -348,11 +349,11 @@ pub fn serve(config: &Config, handler: &impl Handler) -> io::Result<()> {
 ///
 /// No private socket directory.
 pub fn status(config: &Config) -> io::Result<Vec<String>> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::status(config)
+        socket::status(config)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = config;
         Ok(Vec::new())
@@ -368,11 +369,11 @@ pub fn status(config: &Config) -> io::Result<Vec<String>> {
 /// No private socket directory, or a stopped daemon was still running after
 /// [`Config::stop_wait`].
 pub fn stop(config: &Config, force: bool) -> io::Result<usize> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::stop(config, force)
+        socket::stop(config, force)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (config, force);
         Ok(0)

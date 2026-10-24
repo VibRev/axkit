@@ -188,7 +188,7 @@ JSON 模式：stderr 最后一行是单行 JSON，stdout 不写错误：
 | 每个用户、每个工具、每个构建一个 daemon；**第一次调用时自动拉起**，agent 不需要知道它的存在 | 必须 |
 | 客户端把 argv、cwd 和相关环境变量转发给 daemon；daemon 以帧的形式回传 stdout、stderr、进度、退出码 | 必须 |
 | socket 名对「二进制身份（路径、大小、mtime、版本）+ 协议版本 + 影响输出的配置」取 hash | 必须 |
-| Unix：socket 放在只有本用户可访问的目录，两端校验对方 uid；Windows：named pipe，ACL 只授予当前用户 | 必须 |
+| 传输是 Unix domain socket（Windows 10 1803 起原生支持 AF_UNIX，协议与目录布局两边相同）。Unix：socket 目录只有本用户可访问，两端校验对方 uid；Windows：AF_UNIX 拿不到对端身份，socket 目录放在 `%LOCALAPPDATA%` 下，靠它继承的 ACL（只授予当前用户、SYSTEM 与管理员）把住访问 | 必须 |
 | 客户端断开（Ctrl-C）即取消该请求 | 必须 |
 | 空闲超时后 daemon 退出，默认 15 分钟 | 必须 |
 | `<TOOL>_DAEMON=off` 关闭 daemon，每次调用都在本进程执行（慢，但结果相同） | 必须 |
@@ -197,7 +197,7 @@ JSON 模式：stderr 最后一行是单行 JSON，stdout 不写错误：
 | 命令执行到一半 daemon 消失：`session_lost`，退出码 3 | 必须 |
 | 命令需要读 stdin 时（如 `exec -`），由客户端读完、随请求发给 daemon；工具声明哪些命令行需要（`Config::wants_stdin`） | 必须 |
 | 连不上 daemon（socket 目录不私有、路径过长、拉起失败、拉起后未在 `start_wait` 内就绪、连接后未作答）**不得静默**：报 `target_unavailable`，写明原因，hint 给出修法和 `<TOOL>_DAEMON=off`；不换个进程悄悄执行（会话只在 daemon 里） | 必须 |
-| socket 目录：`<TOOL>_RUNTIME_DIR`，否则 `$XDG_RUNTIME_DIR/<tool>`；放不下 socket 路径（`sockaddr_un` 按 104 字节算）时依次退到 `<temp>/<tool>-<uid>`、`/tmp/<tool>-<uid>`；选中的目录必须属于本用户、权限 0700。兜底目录由所有放不下的 runtime 目录共用，所以 `status` / `stop` 只认本 family（可执行文件、HOME / 缓存目录、umask 相同）的 socket，不碰别人的 daemon | 必须 |
+| socket 目录：`<TOOL>_RUNTIME_DIR`，否则 `$XDG_RUNTIME_DIR/<tool>`（Windows：`%LOCALAPPDATA%\<tool>`）；放不下 socket 路径（`sockaddr_un` 按 104 字节算，Windows 108）时依次退到 `<temp>/<tool>-<uid>`、`/tmp/<tool>-<uid>`（Windows：`<temp>\<tool>-<USERNAME>`）；Unix 上选中的目录必须属于本用户、权限 0700，Windows 上必须是目录而不是链接。daemon 脱离客户端的会话与终端（Unix `setsid`；Windows `DETACHED_PROCESS` 加新进程组，客户端的 Ctrl-C 到不了它）。兜底目录由所有放不下的 runtime 目录共用，所以 `status` / `stop` 只认本 family（可执行文件、HOME / 缓存目录、umask 相同）的 socket，不碰别人的 daemon | 必须 |
 | `daemon stop` 在被停的 daemon 真正退出（socket 已删、lock 已释放，即会话已全部关闭）后才返回，超过 `stop_wait`（默认 30 秒）报错 | 必须 |
 | 被新构建取代的 daemon 退出时删除自己的 lock 文件；daemon 启动时删除同一可执行文件其他构建的、无人持有的 lock 与 socket | 必须 |
 | `daemon status` 每个 daemon 一行，含 pid、运行时长、请求数、还剩多少秒空闲就退出，后面跟工具给的会话行 | 应当 |

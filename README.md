@@ -54,7 +54,9 @@ cargo run --example echo_tool -- daemon status
 ## 平台
 
 - Linux、macOS：daemon 用 Unix socket。
+- Windows（10 1803 及以上，x86_64）：同样是 Unix socket，Windows 原生的 AF_UNIX（[`uds_windows`](https://crates.io/crates/uds_windows)），协议与目录布局不变。socket 目录在 `%LOCALAPPDATA%\<tool>\daemon`，靠它继承的 ACL 只让本用户进入（AF_UNIX 在 Windows 上拿不到对端 uid）；daemon 以 `DETACHED_PROCESS` 启动，不占控制台，客户端的 Ctrl-C 到不了它。目前只做过交叉编译与 CI，没有在真机上长期跑过。
 - 其他平台：`forward` 返回 `None`，命令在本进程执行，没有 daemon。
+- `eval/`（axkit-eval）的 setup 和判定命令经 `sh` 执行：Windows 上需要 Git for Windows 的 `usr\bin` 在 `PATH` 上；内存余量检查只在 Linux、macOS 上有。
 
 ## 待做
 

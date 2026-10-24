@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      # axkit-eval's judges and setups run through `sh`: Git for Windows has one.
+      - if: runner.os == 'Windows'
+        run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
+      - if: runner.os == 'Linux'
+        run: cargo fmt --check && cargo fmt --check --manifest-path eval/Cargo.toml
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo clippy --all-targets --manifest-path eval/Cargo.toml -- -D warnings
+      - run: cargo test --manifest-path eval/Cargo.toml

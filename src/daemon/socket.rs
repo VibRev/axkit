@@ -1,24 +1,17 @@
 use super::frame::{PROTOCOL, Tag, fields, put, read_frame, write_frame};
+use super::sys::{self, SUN_PATH_MAX, UnixListener, UnixStream};
 use super::{Cancel, Config, Handler, Io, Outcome, Request};
 use crate::exit::{ErrorKind, Exit, Failure};
 use crate::output::cache_dir;
 use std::cell::RefCell;
-use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// The smallest `sockaddr_un` path room of the supported systems (macOS).
-const SUN_PATH_MAX: usize = 104;
 /// Bytes of stdout the daemon buffers before relaying them.
 const FRAME_BYTES: usize = 64 << 10;
 /// How often the daemon checks whether to exit.
@@ -76,11 +69,12 @@ fn log_hint(config: &Config) -> String {
 fn reach(config: &Config) -> Result<(Identity, UnixStream), Unreachable> {
     let id = Identity::of(config).map_err(|e| Unreachable::new(format!("cannot identify this executable: {e}"), ""))?;
     let dir = socket_dir(config).map_err(|e| {
-        let hint = format!(
-            "set {} to a short directory only you can enter (mkdir -m 700 /tmp/{}-dir)",
-            config.env_name("RUNTIME_DIR"),
-            config.tool
-        );
+        let example = if cfg!(windows) {
+            format!("a folder under %LOCALAPPDATA%, say %LOCALAPPDATA%\\{}", config.tool)
+        } else {
+            format!("mkdir -m 700 /tmp/{}-dir", config.tool)
+        };
+        let hint = format!("set {} to a short directory only you can enter ({example})", config.env_name("RUNTIME_DIR"));
         Unreachable::new(e.to_string(), &hint)
     })?;
     let sock = dir.join(id.socket_name());
@@ -115,7 +109,7 @@ pub(super) fn serve(config: &Config, handler: &impl Handler) -> io::Result<()> {
     let sock = dir.join(id.socket_name());
     let _ = fs::remove_file(&sock); // a dead daemon's: we hold the lock
     let listener = UnixListener::bind(&sock)?;
-    fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
+    sys::restrict(&sock)?;
     retire_older_builds(&dir, &id);
     let daemon = Daemon {
         id,
@@ -136,7 +130,7 @@ pub(super) fn serve(config: &Config, handler: &impl Handler) -> io::Result<()> {
                 break;
             }
             let Ok(stream) = stream else { continue };
-            if peer_uid(&stream) != Some(uid()) {
+            if !sys::same_user(&stream) {
                 continue;
             }
             let daemon = &daemon;
@@ -226,8 +220,7 @@ impl Quit {
 
 /// Take the lock on `file` without waiting; held until the file is closed.
 fn try_lock(file: &File) -> bool {
-    // SAFETY: flock on a descriptor this process owns, open for the call.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    file.try_lock().is_ok()
 }
 
 /// Some process holds the lock at `path`.
@@ -269,14 +262,14 @@ impl Identity {
         build.write(&mtime.to_le_bytes());
         build.write(&PROTOCOL.to_le_bytes());
         let mut family = Fnv::default();
-        family.write(exe.as_os_str().as_bytes());
+        family.write(&sys::os_to_wire(exe.as_os_str()));
         family.write(&config.fingerprint);
         // Where the daemon writes spill files and traces, and with which
         // mode: the client's would be the same in its own process.
-        for var in ["HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
-            family.write(std::env::var_os(var).unwrap_or_default().as_bytes());
+        for var in sys::PLACE_VARS {
+            family.write(&sys::os_to_wire(&std::env::var_os(var).unwrap_or_default()));
         }
-        family.write(&umask().to_le_bytes());
+        family.write(&sys::umask().to_le_bytes());
         Ok(Identity { family: family.finish(), build: build.finish() })
     }
 
@@ -318,49 +311,6 @@ impl Fnv {
     }
 }
 
-/// The process's umask. Linux reports it; elsewhere it is read by setting
-/// and restoring it, which races with threads creating files.
-fn umask() -> u32 {
-    let reported = fs::read_to_string("/proc/self/status").ok().and_then(|s| {
-        let line = s.lines().find_map(|l| l.strip_prefix("Umask:"))?;
-        u32::from_str_radix(line.trim(), 8).ok()
-    });
-    reported.unwrap_or_else(|| {
-        #[allow(clippy::useless_conversion)] // `mode_t` is u32 on Linux but u16 on macOS
-        // SAFETY: umask only swaps the process's file mode mask, restored at once.
-        unsafe {
-            let m = libc::umask(0o022);
-            libc::umask(m);
-            u32::from(m)
-        }
-    })
-}
-
-fn uid() -> u32 {
-    // SAFETY: getuid has no preconditions.
-    unsafe { libc::getuid() }
-}
-
-/// The uid of the process at the other end of `stream`.
-fn peer_uid(stream: &UnixStream) -> Option<u32> {
-    let fd = stream.as_raw_fd();
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
-        let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).ok()?;
-        // SAFETY: `cred` and `len` are valid for writes of the sizes passed.
-        let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &raw mut len) };
-        (rc == 0).then_some(cred.uid)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    {
-        let (mut uid, mut gid) = (0, 0);
-        // SAFETY: both out-pointers are valid for writes.
-        let rc = unsafe { libc::getpeereid(fd, &raw mut uid, &raw mut gid) };
-        (rc == 0).then_some(uid)
-    }
-}
-
 /// `<runtime dir>/daemon`, created private: the configured directory, or a
 /// short one when that is unset or would make socket paths too long.
 ///
@@ -370,21 +320,15 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
 /// it, or no candidate leaves room for a socket path in `sockaddr_un`.
 fn socket_dir(config: &Config) -> io::Result<PathBuf> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let preferred = config
-        .runtime_dir
-        .clone()
-        .or_else(|| var(&config.env_name("RUNTIME_DIR")))
-        .or_else(|| var("XDG_RUNTIME_DIR").map(|d| d.join(config.tool)));
-    let own = format!("{}-{}", config.tool, uid());
-    let candidates: Vec<PathBuf> =
-        preferred.into_iter().chain([std::env::temp_dir().join(&own), PathBuf::from("/tmp").join(&own)]).collect();
+    let preferred = config.runtime_dir.clone().or_else(|| var(&config.env_name("RUNTIME_DIR"))).or_else(|| sys::session_base(config.tool));
+    let candidates: Vec<PathBuf> = preferred.into_iter().chain(sys::shared_bases(config.tool)).collect();
     let Some(base) = candidates.iter().find(|base| fits(&base.join("daemon"))) else {
         let tried: Vec<String> = candidates.iter().map(|c| c.display().to_string()).collect();
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("no socket directory short enough (tried {})", tried.join(", "))));
     };
     let dir = base.join("daemon");
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
-    if private(base) && private(&dir) {
+    sys::create_private_dir(&dir)?;
+    if sys::private(base) && sys::private(&dir) {
         Ok(dir)
     } else {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is not private to this user", dir.display())))
@@ -396,15 +340,10 @@ fn fits(dir: &Path) -> bool {
     dir.as_os_str().len() + "/0123456789abcdef-0123456789abcdef.sock".len() < SUN_PATH_MAX
 }
 
-/// Owned by this user, closed to everyone else, and not a symlink.
-fn private(dir: &Path) -> bool {
-    fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid() && m.mode() & 0o077 == 0)
-}
-
 /// A daemon's socket, if one answers there as this user.
 fn connect(sock: &Path) -> Option<UnixStream> {
     let stream = UnixStream::connect(sock).ok()?;
-    (peer_uid(&stream) == Some(uid())).then_some(stream)
+    sys::same_user(&stream).then_some(stream)
 }
 
 fn sockets(dir: &Path) -> Vec<PathBuf> {
@@ -422,18 +361,12 @@ fn spawn(config: &Config) -> io::Result<std::process::Child> {
     let stderr = log
         .parent()
         .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| File::options().create(true).append(true).mode(0o600).open(&log))
+        .and_then(|()| sys::open_private_append(&log))
         .map_or_else(|_| Stdio::null(), Stdio::from);
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    cmd.args(&config.serve_args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(stderr);
-    // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    // Not reaped: it outlives this process and is adopted by init.
+    cmd.args(&config.serve_args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(stderr);
+    sys::detach(&mut cmd);
+    // Not reaped: it outlives this process (adopted by init on Unix).
     cmd.spawn()
 }
 
@@ -461,18 +394,18 @@ fn wait_for(sock: &Path, mut child: std::process::Child, wait: Duration) -> Opti
 fn encode(id: &Identity, req: &Request) -> Vec<u8> {
     let mut buf = Vec::new();
     put(&mut buf, id.name().as_bytes());
-    put(&mut buf, req.cwd.as_os_str().as_bytes());
+    put(&mut buf, &sys::os_to_wire(req.cwd.as_os_str()));
     let flags = u8::from(req.stdout_is_terminal) | u8::from(req.stderr_is_terminal) << 1 | u8::from(req.stdin.is_some()) << 2;
     put(&mut buf, &[flags]);
     put(&mut buf, req.stdin.as_deref().unwrap_or_default());
     let argc = u32::try_from(req.args.len()).expect("fewer than 4G arguments");
     put(&mut buf, &argc.to_le_bytes());
     for a in &req.args {
-        put(&mut buf, a.as_bytes());
+        put(&mut buf, &sys::os_to_wire(a));
     }
     for (k, v) in &req.env {
-        put(&mut buf, k.as_bytes());
-        put(&mut buf, v.as_bytes());
+        put(&mut buf, &sys::os_to_wire(k));
+        put(&mut buf, &sys::os_to_wire(v));
     }
     buf
 }
@@ -483,12 +416,12 @@ fn decode(body: &[u8]) -> Option<(String, Request)> {
     let [name, cwd, flags, stdin, argc, rest @ ..] = &fields[..] else { return None };
     let argc = usize::try_from(u32::from_le_bytes((*argc).try_into().ok()?)).ok()?;
     let (args, env) = (rest.get(..argc)?, rest.get(argc..)?);
-    let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+    let os = |b: &[u8]| sys::os_from_wire(b);
     let flags = *flags.first()?;
     let request = Request {
-        cwd: PathBuf::from(OsStr::from_bytes(cwd)),
-        args: args.iter().map(|a| os(a)).collect(),
-        env: env.as_chunks::<2>().0.iter().map(|[k, v]| (os(k), os(v))).collect(),
+        cwd: PathBuf::from(os(cwd)?),
+        args: args.iter().map(|a| os(a)).collect::<Option<_>>()?,
+        env: env.as_chunks::<2>().0.iter().map(|[k, v]| Some((os(k)?, os(v)?))).collect::<Option<_>>()?,
         stdout_is_terminal: flags & 1 != 0,
         stderr_is_terminal: flags & 2 != 0,
         stdin: (flags & 4 != 0).then(|| stdin.to_vec()),
@@ -776,6 +709,7 @@ impl Write for FrameWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -802,7 +736,7 @@ mod tests {
         config.runtime_dir = Some(PathBuf::from(format!("/tmp/{}", "x".repeat(SUN_PATH_MAX))));
         let dir = socket_dir(&config).unwrap();
         assert!(fits(&dir), "{}", dir.display());
-        assert!(dir.ends_with(format!("axlong-{}/daemon", uid())), "{}", dir.display());
+        assert!(dir.ends_with(Path::new(&format!("axlong-{}", sys::user_tag())).join("daemon")), "{}", dir.display());
         let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
@@ -811,25 +745,6 @@ mod tests {
         let id = Identity { family: 0xabc, build: u64::MAX };
         assert_eq!(Identity::of_socket(Path::new(&id.socket_name())), Some(id));
         assert_eq!(Identity::of_socket(Path::new("junk.sock")), None);
-    }
-
-    #[test]
-    fn peer_uid_is_ours_on_a_socket_pair() {
-        let (a, _b) = UnixStream::pair().unwrap();
-        assert_eq!(peer_uid(&a), Some(uid()));
-    }
-
-    #[test]
-    fn only_private_directories_hold_the_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = dir.path().join("d");
-        fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
-        assert!(private(&d));
-        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(!private(&d), "others may enter it");
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
-        assert!(!private(&link), "a symlink is not followed");
     }
 
     #[test]
@@ -919,8 +834,15 @@ mod tests {
     impl Harness {
         fn new() -> Harness {
             // Short: the socket path must fit `sockaddr_un`.
-            let dir = tempfile::Builder::new().prefix("ax").tempdir_in("/tmp").unwrap();
-            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            #[cfg(unix)]
+            let dir = {
+                use std::os::unix::fs::PermissionsExt;
+                let dir = tempfile::Builder::new().prefix("ax").tempdir_in("/tmp").unwrap();
+                fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+                dir
+            };
+            #[cfg(windows)]
+            let dir = tempfile::Builder::new().prefix("ax").tempdir().unwrap();
             let mut config = Config::new("axtest", "0");
             config.runtime_dir = Some(dir.path().to_path_buf());
             config.idle = Duration::from_secs(60);
