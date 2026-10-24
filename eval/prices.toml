@@ -1,0 +1,72 @@
+# Dollars per million tokens. Cost is recomputed from token counts with this
+# table; a harness's own reported cost is kept beside it, never trusted.
+#
+# Source for the Claude rows: Anthropic first-party API rates as listed by the
+# claude-api skill bundled with Claude Code 2.1.309 (model table cached
+# 2026-10-06; cache economics in shared/prompt-caching.md): cache writes are
+# 1.25x input for the 5-minute TTL and 2x for 1 hour; cache reads are 0.1x
+# input, except 0.05x on Opus 5.5 and 0.025x on Fable 5.1. Haiku 5.5 is the
+# <=100K-token-prompt tier ($0.50 / $2.50 above that).
+#
+# A model that is not listed here has an unknown price: its cost is reported
+# as unknown rather than guessed. That currently covers the codex model behind
+# the user's custom provider and every grok model (xAI publishes no rate this
+# repo has verified); grok reports its own cost, which is kept as reported.
+#
+# `aliases` are matched as substrings of the model name a stream reports.
+
+[models.claude-fable-5-1]
+aliases = ["fable"]
+input = 10.0
+output = 50.0
+cache_write_5m = 12.5
+cache_write_1h = 20.0
+cache_read = 0.25
+
+[models.claude-opus-5-5]
+aliases = ["opus-5-5", "opus"]
+input = 4.0
+output = 20.0
+cache_write_5m = 5.0
+cache_write_1h = 8.0
+cache_read = 0.20
+
+[models.claude-sonnet-5-5]
+aliases = ["sonnet-5-5", "sonnet"]
+input = 2.0
+output = 10.0
+cache_write_5m = 2.5
+cache_write_1h = 4.0
+cache_read = 0.20
+
+[models.claude-haiku-5-5]
+aliases = ["haiku-5-5", "haiku"]
+input = 0.10
+output = 0.50
+cache_write_5m = 0.125
+cache_write_1h = 0.20
+cache_read = 0.01
+
+[models.claude-haiku-4-5]
+aliases = ["haiku-4-5"]
+input = 1.0
+output = 5.0
+cache_write_5m = 1.25
+cache_write_1h = 2.0
+cache_read = 0.10
+
+[models.claude-sonnet-4-6]
+aliases = ["sonnet-4-6"]
+input = 3.0
+output = 15.0
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+cache_read = 0.30
+
+[models.claude-opus-4-8]
+aliases = ["opus-4-8"]
+input = 5.0
+output = 25.0
+cache_write_5m = 6.25
+cache_write_1h = 10.0
+cache_read = 0.50
