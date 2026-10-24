@@ -1,8 +1,30 @@
 # axkit-eval
 
-一个与领域无关的评测运行器，兑现 axkit 约定 §12：拿一组任务，用真实的 agent harness 跑多轮，量出成功率、轮次、**分类型 token 与成本**、工具输出字节和被截断的次数。idax 和 bnx 在各自的 `eval/` 下提供任务集与 fixture，这里只管「怎么跑、怎么量」。
+A domain-agnostic eval runner: real agent harnesses (claude, codex, grok) on task suites, measuring pass rate, turns, tokens by type, cost and tool output.
 
-逆向无关：运行器只认识任务、分组、工作区、事件流、token 和成本。
+一个与领域无关的评测运行器，对应 [axkit 约定](https://github.com/VibRev/axkit/blob/main/docs/CONVENTIONS.md) §11：拿一组任务，用真实的 agent harness 跑多轮，量出成功率、轮次、**分类型 token 与成本**、工具输出字节和被截断的次数。idax 和 bnx 在各自的 `eval/` 下提供任务集与 fixture，这里只管「怎么跑、怎么量」。运行器只认识任务、分组、工作区、事件流、token 和成本，与逆向无关。
+
+## 评测结论
+
+完整数据见 [评测报告（2026-10-24）](https://github.com/VibRev/axkit/blob/main/eval/reports/2026-10-24-slim.md)。那次对比覆盖 idax / bnx 的 CLI、CLI + skill、自带 MCP，以及官方或第三方的 MCP server，同一台机器、同样 7 个任务、三个 harness，每组跑一次。
+
+1. **省 token 的关键是代码模式加很小的工具面，CLI 还是 MCP 不是关键。** 自带 MCP 只有 5 个工具，定义约 2 KB。在 claude 上它比我们自己的 CLI 少约 1/3 token，比官方 ida-mcp 少 40–50%，只有大 schema MCP（ida-headless-mcp、bn-headless-mcp）的 1/4 到 1/7。
+2. **prelude 不需要 helper。** 去掉 helper 之后，agent 直接写原生 API，成功率不变，大多数组的 token 持平或下降。codex 的 token 降了 17–30%，耗时减半。
+3. **输出要有上限。** 官方 ida-mcp 不截断输出，codex 和 grok 拿到的工具输出是我们的 2–5 倍。
+4. **API 交给 `ref <words>` 现查**：它直接检索安装目录里的 Python API，返回签名和 `文件:行号`，取代了 helper。
+
+每个会话总 token 的中位数如下（右侧两列是官方或第三方 MCP）：
+
+| 引擎 / harness | CLI | CLI + skill | 自带 MCP | 官方 / 第三方 MCP |
+|---|---|---|---|---|
+| IDA / claude | 47.3k | 48.0k | **32.3k** | ida-mcp 53.7k；ida-headless 226k |
+| IDA / codex | 82.0k | 68.5k | 98.7k | ida-mcp 123.5k；ida-headless 237.5k |
+| IDA / grok | 56.7k | 60.5k | **50.4k** | ida-mcp 107.6k；ida-headless 125.9k |
+| BN / claude | 47.0k | 37.7k | **31.1k** | bn-headless 118k |
+| BN / codex | 76.4k | 66.4k | 95.7k | bn-headless 130.2k |
+| BN / grok | 52.0k | 54.3k | **49.9k** | bn-headless 不可用 |
+
+通过率 125/126（官方和第三方 MCP 那一轮是 138/140）。这套任务几乎每种接法都能做对，所以拉开差距的是成本，而不是能力。
 
 ## 命令
 
@@ -85,7 +107,7 @@ mcp = { name = "ida", command = "{env:AXEVAL_IDA_MCP}", args = ["stdio"], env = 
 
 ## 指标
 
-每个运行从事件流读出：是否完成、轮次、工具调用数、工具报错数、工具输出字节、被截断次数（数工具输出里以 axkit `# records … shown … full output saved to` 结尾的提示，也认 0.8 之前的 `full output in`）、分类型 token（input / output / cache write / cache read），以及流里自带的成本（留作对照）。**成本在本地按价目表从 token 重算**——走企业网关时流里的 `total_cost_usd` 常为 0 或不准，所以不采信它。
+每个运行从事件流读出：是否完成、轮次、工具调用数、工具报错数、工具输出字节、被截断次数（数工具输出里以 axkit `# records … shown … full output saved to` 结尾的提示）、分类型 token（input / output / cache write / cache read），以及流里自带的成本（留作对照）。**成本在本地按价目表从 token 重算**：流里的 `total_cost_usd` 经过网关时常为 0 或不准，所以不采信它。
 
 价目表：`--price` 指定，否则取 suite 目录旁的 `prices.toml`，再否则用内置底价（haiku/sonnet/opus 三档；未知模型按 opus 计，宁高勿低）。价目随时间变动，内置值仅作兜底，正式评测应提供 `prices.toml`。
 
@@ -97,7 +119,7 @@ mcp = { name = "ida", command = "{env:AXEVAL_IDA_MCP}", args = ["stdio"], env = 
 
 **会话跑在用户的真实环境里**：用户自己的 skill、MCP、全局 CLAUDE.md / AGENTS.md 都是真实使用的一部分，不做隔离。
 
-**铁律**：不 login/logout；凭据一律不复制、不移动、不改写；不覆盖 `HOME`；**认证失败即停**——运行器逐行读事件流，第一条认证失败（只看错误字段，不看工具输出）就立刻杀掉会话、停掉整轮。每个 prompt 末尾追加 suite 的 `rules`：不准复制或读取 license，不准改 `HOME`、`IDAUSR`；被测工具本身跑不起来（daemon 起不来、license 或权限错误）就报告而不是绕过（冒烟里 agent 两次自己把 IDA license 拷到 /tmp 绕过沙箱，才加了这条）。脚本自己的错误（名字写错、异常）不在此列：早先写成「工具出错就报错」时，codex 把一次 `LookupError` 当成工具故障直接交卷，所以 rules 明确说这类错误照提示继续。
+**铁律**：不 login/logout；凭据一律不复制、不移动、不改写；不覆盖 `HOME`；**认证失败即停**——运行器逐行读事件流，第一条认证失败（只看错误字段，不看工具输出）就立刻杀掉会话、停掉整轮。每个 prompt 末尾追加 suite 的 `rules`：不准复制或读取 license，不准改 `HOME`、`IDAUSR`；被测工具本身跑不起来（daemon 起不来、license 或权限错误）时，要报告出来，不能绕过；agent 曾自己把 license 拷到别处来绕过沙箱。脚本自己的错误（名字写错、抛异常）不算在内，rules 明确要求照提示改了继续；否则 agent 会把一次 `LookupError` 当成工具故障直接交卷。
 
 | harness | 命令要点 | 凭据保护 | 每次运行后清理（只删本次的） |
 |---|---|---|---|
@@ -110,7 +132,7 @@ mcp = { name = "ida", command = "{env:AXEVAL_IDA_MCP}", args = ["stdio"], env = 
 - grok headless 下任何一条不被允许的命令都会取消整个会话，所以用 `--always-approve`。
 - `--trust` 会写 `~/.grok/trusted_folders.toml`（沙箱拦不住），由上面的清理删掉。grok 自己读改写这个文件时不加锁，并发启动和清理会互相覆盖，所以所有评测会话（含不同的 `axkit-eval` 进程和 `purge`）共用一把 flock（`$TMPDIR/axeval-$USER-grok-trust.lock`，不放在 `~/.grok` 里）：启动时从 spawn 一直持有到文件里出现本工作区那张表（最多 15 s），清理时持有到改写完成。
 
-**skill 组**：运行器在本次运行的环境里执行 `<tool> skills`，把输出作为**项目级 skill** 写进工作区：claude `<ws>/.claude/skills/<tool>/SKILL.md`，codex `<ws>/.agents/skills/<tool>/SKILL.md`，grok `<ws>/.grok/skills/<tool>/SKILL.md`。noskill 组依赖用户全局 skill 里没有 idax/bnx（已核对 `~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、`~/.grok/skills`）。
+**skill 组**：运行器在本次运行的环境里执行 `<tool> skills`，把输出作为**项目级 skill** 写进工作区：claude `<ws>/.claude/skills/<tool>/SKILL.md`，codex `<ws>/.agents/skills/<tool>/SKILL.md`，grok `<ws>/.grok/skills/<tool>/SKILL.md`。不带 skill 的组要求用户全局的 skill 目录（`~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、`~/.grok/skills`）里没有被测工具的 skill。
 
 **被测工具隔离**：每次运行有私有的 `/tmp/axe-<run id>`，suite 用它设 `IDAX_RUNTIME_DIR`/`BNX_RUNTIME_DIR` 和 `XDG_CACHE_HOME`，所以并发运行之间不共享 daemon，也不共享 spill 文件；运行结束执行 teardown（`<tool> daemon stop --force`），再删掉整个目录。
 
