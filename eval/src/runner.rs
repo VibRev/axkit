@@ -65,11 +65,11 @@ pub struct Outcome {
 /// judge command could not run.
 pub fn run_one(plan: &Plan<'_>, harness: &dyn Harness) -> Result<Outcome> {
     let stem = plan.stem();
-    // A short path under /tmp: unix socket paths are capped near 104 bytes,
+    // A short path under /tmp (`cleanup::tmp_root`): unix socket paths are capped near 104 bytes,
     // and harness sandboxes let tools write there. Its random suffix is the
     // run id, which the workspace path carries so history keyed by the
     // workspace can be told apart from every other session's.
-    let tmp = tempfile::Builder::new().prefix("axe-").tempdir_in("/tmp").context("creating the run's tmp dir")?;
+    let tmp = tempfile::Builder::new().prefix("axe-").tempdir_in(crate::cleanup::tmp_root()).context("creating the run's tmp dir")?;
     let run_id = tmp.path().file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("axe-")).context("tmp dir name")?.to_owned();
     let workspace = plan.out.join("ws").join(format!("{stem}.{run_id}"));
     fs::create_dir_all(&workspace).with_context(|| format!("creating {}", workspace.display()))?;
@@ -370,8 +370,8 @@ mod tests {
             assert!(s.workspace.to_string_lossy().ends_with(s.run_id) && s.run_id.len() >= 6, "the workspace carries the run id");
             assert!(s.prompt.contains(&*s.workspace.to_string_lossy()) && s.prompt.ends_with("Do not copy license files."));
             assert!(s.workspace.join(".claude/skills/t/SKILL.md").is_file(), "a project-level skill");
-            assert!(s.tmp.starts_with("/tmp") && s.tmp.is_dir());
-            assert!(s.env.iter().any(|(k, v)| k == "PATH" && v.contains("/bin")));
+            assert!(s.tmp.starts_with(crate::cleanup::tmp_root()) && s.tmp.is_dir());
+            assert!(s.env.iter().any(|(k, v)| k == "PATH" && v.contains("bin")));
             Ok(Launched { stream: PASS.to_owned(), ..Launched::default() })
         };
         let o = run(&s, &dir.path().join("out"), &launch);
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!((r.model.as_deref(), r.session_id.as_deref()), (Some("claude-haiku-5-5"), Some("sess-0001")));
         assert!((r.cost_usd.unwrap() - 0.10).abs() < 1e-9, "1M uncached haiku input tokens cost $0.10");
         assert!(dir.path().join("out/t.g.task.0.stream.jsonl").is_file());
-        assert!(!Path::new("/tmp").join(format!("axe-{}", r.run_id)).exists(), "the tmp dir is gone");
+        assert!(!crate::cleanup::tmp_root().join(format!("axe-{}", r.run_id)).exists(), "the tmp dir is gone");
     }
 
     #[test]

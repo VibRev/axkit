@@ -529,7 +529,7 @@ pub fn run(suite: &Suite, cases: &mut [Case], bin: &[PathBuf], work: &Path, time
     let ws =
         tempfile::Builder::new().prefix(&format!("{}.replay.", suite.suite.name)).tempdir_in(work).context("creating the workspace")?;
     // Short, under /tmp: the tool's daemon socket lives in it.
-    let tmp = tempfile::Builder::new().prefix("axr-").tempdir_in("/tmp").context("creating the tmp dir")?;
+    let tmp = tempfile::Builder::new().prefix("axr-").tempdir_in(crate::cleanup::tmp_root()).context("creating the tmp dir")?;
     for file in suite.tasks.iter().flat_map(|t| &t.files) {
         let src = suite.resolve(file);
         let name = Path::new(file).file_name().context("task file has no name")?;

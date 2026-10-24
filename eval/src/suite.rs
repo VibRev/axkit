@@ -240,9 +240,9 @@ impl Judge {
 
 /// `~/x` as a path under `$HOME`.
 pub fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => PathBuf::from(path),
+    match path.strip_prefix("~/") {
+        Some(rest) => crate::cleanup::home().join(rest),
+        None => PathBuf::from(path),
     }
 }
 
@@ -326,8 +326,8 @@ allow = ["Bash(tool *)"]
     fn templates_replace_known_names_only() {
         let vars = Vars::default().with("ws", "/w");
         assert_eq!(vars.expand("{ws}/crackme {x}"), "/w/crackme {x}");
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(vars.expand("{env:HOME}/a {env:AXEVAL_SURELY_UNSET} {env:"), format!("{home}/a  {{env:"));
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(vars.expand("{env:PATH}/a {env:AXEVAL_SURELY_UNSET} {env:"), format!("{path}/a  {{env:"));
     }
 
     #[test]

@@ -118,7 +118,7 @@ impl Harness for Grok {
         }
         // Absolute paths: a project profile does not expand `~` in
         // `read_write` (the grant silently matched nothing).
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::cleanup::home().to_string_lossy().into_owned();
         let absolute = |x: &&str| x.replacen('~', &home, 1);
         let quote = |xs: &[String]| xs.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join(", ");
         let state: Vec<String> = ENGINE_STATE.iter().map(absolute).filter(|p| std::path::Path::new(p).exists()).collect();
@@ -364,7 +364,7 @@ mod tests {
         let profile: toml::Value = toml::from_str(&text).unwrap();
         let p = &profile["profiles"]["axeval"];
         assert_eq!(p["extends"].as_str(), Some("workspace"));
-        let home = std::env::var("HOME").unwrap();
+        let home = crate::cleanup::home().to_string_lossy().into_owned();
         let granted = p["read_write"].as_array().unwrap();
         if std::path::Path::new(&format!("{home}/.idapro")).exists() {
             assert!(granted.iter().any(|v| v.as_str() == Some(&*format!("{home}/.idapro"))), "absolute, not ~");

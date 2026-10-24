@@ -36,7 +36,13 @@ impl Report {
 /// The user's home, where the harness stores live.
 #[must_use]
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/nonexistent"), PathBuf::from)
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map_or_else(|| PathBuf::from("/nonexistent"), PathBuf::from)
+}
+
+/// Where a run's private tmp dir goes: `/tmp` on Unix, short enough for a
+/// unix socket path (macOS's `$TMPDIR` is not); the system temp dir elsewhere.
+pub fn tmp_root() -> PathBuf {
+    if cfg!(unix) { PathBuf::from("/tmp") } else { std::env::temp_dir() }
 }
 
 /// Remove `dir` when its name contains `run_id`; refuse otherwise.
